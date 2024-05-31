@@ -21,49 +21,61 @@ type CrawlData struct {
 	Err  error
 }
 
-func crawl(wg *sync.WaitGroup, crawlCh <-chan string, writeCh chan<- CrawlData) {
+func crawl(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return body, nil
+}
+
+func crawlConsumer(wg *sync.WaitGroup, crawlCh <-chan string, writeCh chan<- CrawlData) {
 	defer wg.Done()
 	for v := range crawlCh {
-		resp, err := http.Get(v)
+		data, err := crawl(v)
 		if err != nil {
+			log.Println("Failed to crawl URL:", v, "Error:", err)
 			writeCh <- CrawlData{Url: v, Err: err}
-			return
+			continue
 		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			writeCh <- CrawlData{Url: v, Err: err}
-			return
-		}
-		writeCh <- CrawlData{Url: v, Data: string(body)}
+		writeCh <- CrawlData{Url: v, Data: string(data)}
 	}
 }
 
-func write(wg *sync.WaitGroup, writeCh <-chan CrawlData) {
+func write(data CrawlData) error {
+	if data.Err != nil {
+		return data.Err
+	}
+
+	if err := os.MkdirAll("output", os.ModePerm); err != nil {
+		return err
+	}
+
+	fileName := "output/" + normalizeFilename(data.Url)
+	f, err := os.Create(fileName)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = io.WriteString(f, data.Data)
+	return err
+}
+
+func writeConsumer(wg *sync.WaitGroup, writeCh <-chan CrawlData) {
 	defer wg.Done()
 	for v := range writeCh {
-		if v.Err != nil {
-			log.Println("URL:", v.Url, "Error:", v.Err)
+		if err := write(v); err != nil {
+			log.Println("Failed to write URL:", v.Url, "Error:", err)
 			continue
 		}
-
-		if err := os.MkdirAll("output", os.ModePerm); err != nil {
-			log.Fatal(err)
-		}
-
-		fileName := "output/" + normalizeFilename(v.Url)
-		f, err := os.Create(fileName)
-		if err != nil {
-			log.Println("Error creating file", fileName, ":", err)
-			continue
-		}
-
-		_, err = io.WriteString(f, v.Data)
-		if err != nil {
-			log.Println("Error writing to file", fileName, ":", err)
-		}
-		f.Close()
 	}
 }
 
@@ -77,14 +89,14 @@ func CrawAndWrite(urls []string) {
 	var wgCrawl sync.WaitGroup
 	for i := 0; i < numOfCrawlWorkers; i++ {
 		wgCrawl.Add(1)
-		go crawl(&wgCrawl, crawlCh, writeCh)
+		go crawlConsumer(&wgCrawl, crawlCh, writeCh)
 	}
 
 	// Start write workers
 	var wgWrite sync.WaitGroup
 	for i := 0; i < numOfWriteWorkers; i++ {
 		wgWrite.Add(1)
-		go write(&wgWrite, writeCh)
+		go writeConsumer(&wgWrite, writeCh)
 	}
 
 	// Add URLs to crawl
